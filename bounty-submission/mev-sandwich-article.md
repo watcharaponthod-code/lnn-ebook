@@ -1,199 +1,109 @@
 ---
-title: "MEV Sandwich Attacks on DEX AMMs — Systematic Retail Value Extraction and On-Chain Detection"
+title: "MEV Sandwich Attacks on DEX AMMs — Retail Value Extraction and On-Chain Detection"
 date: 2026-05-20
-description: "Maximal extractable value (MEV) sandwich attacks exploit the deterministic price-impact curve of automated market makers to systematically extract value from retail DEX traders. This article quantifies the retail cost using Flashbots and EigenPhi on-chain data, derives detection metrics from public block data, and reviews major sandwich extraction events on Ethereum, Solana, and Arbitrum."
+description: "Maximal extractable value (MEV) sandwich attacks exploit the predictable price-impact of automated market makers to extract value from retail DEX traders within a single block. This article examines the mechanics, quantifies extraction using EigenPhi and academic on-chain datasets, and reviews the jaredfromsubway.eth case on Ethereum and the Jito mempool shutdown on Solana."
 entities:
   - Uniswap
   - Flashbots
   - Ethereum
   - Solana
-  - Arbitrum
   - jaredfromsubway.eth
   - Jito Labs
 ---
 
 ## Summary
 
-1. **Scale of extraction:** MEV sandwich attacks extracted an estimated **$1.28 billion** from DEX traders between January 2020 and December 2024, with peak monthly extraction of approximately **$46 million** in November 2021, per Flashbots MEV-Explore and EigenPhi cumulative on-chain data.
-2. **Single-bot dominance:** The Ethereum address `0xae2Fc483527B8EF99EB5D9B44875F005ba1FaE13` (ENS: `jaredfromsubway.eth`) accounted for approximately **22% of all Ethereum mainnet sandwich volume** between April 2023 and March 2024, spending over **$11 million in gas fees** to extract an estimated **$40 million** gross profit.
-3. **Low barrier to victim:** The median sandwiched transaction sets slippage tolerance ≥ 2%, allowing bots to profitably target swaps as small as **$200–$500** at typical Ethereum gas prices — meaning retail users transacting in low-liquidity token pools are systematically targeted.
-4. **Detection signal strength:** A sandwich triple detector (same-pool front-run + victim + back-run within one block, same attacker address) achieves a precision of **0.87** on Ethereum mainnet blocks, with a false-positive rate of ~4% when same-token round-trip filtering is applied.
-5. **Protocol response:** Jito Labs temporarily disabled its Solana mempool access on **March 6, 2024** in direct response to community complaints about sandwich attacks, highlighting that the manipulation is acknowledged as harmful even by infrastructure operators who profit from MEV fees.
+1. **Documented scale:** A 2024 academic re-measurement identified **3,016,971 sandwich attacks** on Ethereum from July 2015 through August 2023, with conjoined variants yielding approximately 5× higher median profit than single-victim attacks (Qin et al., arxiv 2405.17944).
+2. **Single-bot dominance:** The bot `jaredfromsubway.eth` executed **238,000 sandwich attacks** in roughly ten weeks (February–May 2023), generating $40.65 million in gross revenue from victims while paying $34.35 million in gas — a net profit of **$6.3 million** — and affecting over 106,000 victim addresses (EigenPhi, May 2023).
+3. **Persistence:** By August 2024, after launching a second-generation bot, the jaredfromsubway operator had accumulated a cumulative lifetime profit of at least **$22 million** since March 2023 (The Block, August 2024). A 2025 EigenPhi dataset attributed roughly **70% of all Ethereum sandwich attacks** to the same entity.
+4. **Protocol response:** On March 8, 2024, Jito Labs suspended the mempool feature of its Solana validator client, explicitly stating that sandwich attacks are "a drag on the Solana ecosystem" — an acknowledgement by MEV infrastructure operators that the activity causes identifiable retail harm (CoinDesk, March 2024).
+5. **Low average profit, high volume:** Across 95,000+ attacks measured from late 2024 into 2025, the average sandwich profit was just above **$3 per attack**, indicating the strategy is viable at industrial bot scale but not for casual or manual operators (EigenPhi via Cointelegraph, 2025).
 
-## Mechanics of the Sandwich Attack
+## Mechanics
 
-A sandwich attack is a maximal extractable value (MEV) strategy that exploits the deterministic price-impact formula of constant-product automated market makers (AMMs). In a standard Uniswap v2-style pool where the invariant is `x × y = k`, any incoming swap shifts the price by a predictable amount that is observable before execution by anyone watching the mempool.
+A sandwich attack exploits the deterministic price-impact of constant-product AMMs. In a standard Uniswap v2-style pool governed by `x × y = k`, any pending swap visible in the public mempool will move the price by a predictable amount. An attacker who observes this transaction can:
 
-The three-step attack sequence:
+1. **Front-run:** Submit a buy order in the same pool ahead of the victim's transaction, driving the price upward.
+2. **Victim execution:** The victim's swap fills at the artificially elevated price, moving it further in the attacker's favour.
+3. **Back-run:** The attacker immediately sells, pocketing the difference between the two execution prices minus gas costs.
 
-1. **Front-run buy** — The attacker submits a buy order in the same pool, in the same block, ahead of the victim's pending transaction. This increases the pool price by an amount proportional to the attacker's trade size relative to pool TVL.
-2. **Victim execution** — The victim's transaction executes at the already-inflated price, moving the pool price further in the attacker's direction. The victim receives fewer output tokens than quoted at the pre-block spot price.
-3. **Back-run sell** — The attacker immediately sells the tokens purchased in step 1, now at a higher effective price created by the victim's own trade. The attacker's net profit is the price difference minus gas costs.
+The attack is distinct from other manipulation types covered in this wiki. **Wash trading** is self-dealing with no external victim; a sandwich attack extracts value directly from a specific third-party swap. **Oracle manipulation** targets lending protocol price feeds rather than swap execution. **Stop-loss hunting** operates through mark-price movements on centralised perp markets; sandwich attacks require public mempool visibility unique to decentralised blockchains.
 
-This is structurally distinct from other manipulation types documented in this wiki. Unlike **wash trading**, which fabricates volume through self-dealing without a direct victim counterparty, sandwich attacks extract value directly from a specific retail transaction. Unlike **oracle manipulation**, which attacks lending protocol price feeds, sandwich attacks target the execution of swap transactions themselves. Unlike **stop-loss hunting**, which targets pre-placed conditional orders on centralised perp markets, sandwich attacks exploit the public mempool visibility unique to decentralised blockchains.
-
-The economic break-even condition for a profitable sandwich on a constant-product AMM is:
+For a constant-product pool, the minimum victim trade size at which a sandwich becomes profitable after gas costs can be approximated as:
 
 ```
-Gross_profit_USD > Gas_cost_USD
-(P_post_front_run - P_pre_front_run) × Attacker_amount > Gas_price × Gas_units
+min_victim_USD ≈ (gas_price_gwei × gas_units × eth_price) / slippage_tolerance
 ```
 
-On low-TVL pools with victim slippage tolerance ≥ 1.5%, this condition is satisfied for victim trades above approximately $200–$500 at Ethereum gas prices of 15–30 gwei. On high-TVL pairs like ETH/USDC, the break-even victim size rises to $50,000–$100,000, effectively protecting mainstream pairs while concentrating risk on long-tail tokens.
+At 20 gwei gas, 300,000 gas units, and $3,000 ETH, a 1% slippage tolerance implies a break-even victim size of roughly $180. On low-TVL long-tail token pools — where retail traders routinely accept 3–10% slippage — the bar is even lower.
 
-## Detection Metrics
+## Detection Approach
 
-### 1. Intra-Block Sandwich Triple Score (IBSTS)
+On-chain detection of sandwich attacks relies on block-level transaction ordering rather than the OHLCV data used to detect wash trading or oracle manipulation. Three observable signals are used in the literature:
 
-The atomic detection unit is the **sandwich triple**: three transactions in the same block, in the same liquidity pool, where the first and third are initiated by the same address and bracket the second (victim).
+**Transaction-order pattern.** A sandwich produces three transactions in the same block referencing the same liquidity pool: a buy by address A, a swap by a different address, and a sell by address A. Qin et al. (2021) operationalise this as a "displacement" pattern and report detecting 57,037 ETH in sandwich-attributed extraction over their 32-month study window using this criterion alone.
 
-For a block B and pool P:
+**Execution price deviation.** A sandwiched swap fills at a worse price than the pool's spot price at block start. Comparing the victim's actual execution price against the pre-block pool ratio provides a per-transaction measure of impact. The 2024 re-measurement paper (arxiv 2405.17944) uses this to validate sandwich labels against the ZeroMEV reference dataset, reporting a 2.4% false-negative rate.
 
-```
-IBSTS(B, P) = count of (T₁, T_victim, T₃) where:
-  sender(T₁) = sender(T₃)
-  pool(T₁) = pool(T_victim) = pool(T₃) = P
-  position(T₁) < position(T_victim) < position(T₃)
-  T₁ is a buy and T₃ is a sell of the same token pair (round-trip filter)
-```
+**Gas bid asymmetry.** A bot running front-run and back-run legs has strong incentive to outbid the victim on gas precisely — not excessively — to guarantee ordering without sacrificing profit. jaredfromsubway.eth's gas expenditure of $34.35 million against $40.65 million in victim revenue during its first ten weeks implies a gas-to-revenue ratio of roughly 84.5%, which is unusually high and consistent with extremely competitive gas bidding to maintain block position at scale.
 
-On Ethereum mainnet blocks from 2023–2024 (sourced from Flashbots block API and EigenPhi labelled dataset), blocks with IBSTS ≥ 1 for any pool P occur in approximately **34% of all blocks**. Applying the round-trip filter reduces false positives to ~4%.
+Supporting analysis code used to query EigenPhi's labelled dataset and replicate the detection pattern is provided in `analysis.py` in this directory.
 
-### 2. Victim Slippage Excess (VSE)
+## Case Study 1: jaredfromsubway.eth on Ethereum (February–August 2024)
 
-VSE quantifies how much worse a victim's execution price was relative to the pool's spot price at the start of the block, before any MEV transactions:
+The most extensively documented sandwich operation on any public blockchain is the bot deployed by the address `0xae2Fc483527B8EF99EB5D9B44875F005ba1FaE13` (ENS: jaredfromsubway.eth).
 
-```
-VSE = (P_execution - P_spot_block_start) / P_spot_block_start
-```
-
-A persistently positive VSE across multiple swaps in the same pool is a statistical signal of systematic front-running. In confirmed sandwich events from EigenPhi's 2023–2024 labelled dataset, VSE ranged from **0.15% to 3.4%**, with a median of **0.71%**. In non-sandwiched swaps in the same pools, VSE clusters near zero (mean: 0.04%, standard deviation: 0.12%).
-
-| Metric | Sandwiched swaps | Non-sandwiched swaps |
-|--------|-----------------|---------------------|
-| VSE median | 0.71% | 0.04% |
-| VSE 90th pct | 2.1% | 0.31% |
-| VSE std dev | 0.58% | 0.12% |
-
-*Source: EigenPhi sandwich attack labelled dataset, Ethereum mainnet, Jan 2023 – Dec 2024.*
-
-### 3. Attacker Return on Gas (ARG)
-
-ARG measures the economic efficiency of a sandwich bot — the ratio of gross profit to gas expenditure. It identifies systematic operators (high ARG, consistent over time) versus opportunistic or failing attacks:
-
-```
-ARG = Gross_profit_USD / Gas_cost_USD
-```
-
-Profitable sandwich bots exhibit ARG of **1.5–8.0**. An ARG < 1.0 indicates a failed attack. An ARG > 20 indicates either extremely low-liquidity pools or bundled MEV strategies that amortise gas across multiple simultaneous sandwiches.
-
-The `jaredfromsubway.eth` bot maintained ARG of approximately **3.2–3.8** over its peak period, indicating a well-optimised operation that consistently earned $3.20–$3.80 for every $1.00 spent on gas.
-
-### 4. Pool Concentration Index (PCI)
-
-PCI measures the fraction of a pool's block-level volume attributable to a single address in sandwiching positions, over a rolling 7-day window:
-
-```
-PCI(address, pool, 7d) = Volume_address_sandwich_positions / Total_pool_volume
-```
-
-A PCI > 0.15 for a single address indicates systematic targeting of a specific pool. `jaredfromsubway.eth` maintained PCI > 0.40 on several Uniswap v3 WETH/SHIB and WETH/PEPE pools during the May 2023 meme coin peak, meaning over **40% of those pools' volume** was the bot's own front-run and back-run transactions — a level of dominance structurally analogous to wash trading in terms of reported volume inflation.
-
-## Case Study 1: `jaredfromsubway.eth` — Systematic Uniswap v3 Targeting (April 2023 – March 2024)
-
-During the 2023 Ethereum meme coin cycle (PEPE, WOJAK, TURBO), a large volume of retail trades was executed in newly launched, low-TVL Uniswap v3 pools with high quoted slippage. The bot address `0xae2Fc483527B8EF99EB5D9B44875F005ba1FaE13` deployed a sandwich strategy specifically targeting pools where victim transaction slippage tolerance exceeded 1.5% on swaps above $500.
-
-The bot submitted MEV bundles exclusively via Flashbots MEV-Boost relays, guaranteeing atomic execution of the sandwich triple within a single block. This is a key forensic marker: the use of private relay submission means the attacker's transactions are not visible in the public mempool before block inclusion, preventing victim countermeasures at the wallet level.
-
-**Operational scale (April 2023 – March 2024, EigenPhi on-chain accounting):**
+**Version 1 (February 21 – ~May 2023).** The original bot contract (`0x6b75d8af000000e20b7a7ddf000ba900b4009a80`, first transaction block 16,673,559) was deployed during the 2023 Ethereum meme coin cycle (PEPE, WOJAK, TURBO). It submitted MEV bundles via Flashbots MEV-Boost relays, guaranteeing atomic sandwich execution within a single block. During the week of April 17, 2023, it appeared in over 60% of all Ethereum blocks — the highest recorded block-inclusion rate for a single MEV bot. By May 8, 2023:
 
 | Metric | Value |
-|--------|-------|
-| Estimated gross MEV extracted | ~$40 million |
-| Total gas paid | ~$11 million |
-| Estimated net profit | ~$29 million |
-| Victim transactions sandwiched | ~1.1 million |
-| Peak gas rank on Ethereum network | #1 spender (April–May 2023) |
-| PCI on WETH/PEPE v3 (0.3% fee tier) | 0.62 at May 2023 peak |
+|---|---|
+| Gross revenue from victims | $40.65 million |
+| Gas fees paid | $34.35 million |
+| Net profit | $6.3 million |
+| Sandwich attacks executed | 238,000 |
+| Victim addresses affected | 106,000+ |
 
-The bot's gas expenditure was itself a market health indicator: during peak operation in April–May 2023, `jaredfromsubway.eth` spent over $1.4 million on gas in a single week — more than any other address on the Ethereum network. This level of gas spending is only rational if gross extraction exceeds it by a significant margin, providing an indirect lower bound on victim losses even without complete on-chain attribution.
+*Source: EigenPhi, "Performance Appraisal of jaredfromsubway.eth," May 2023.*
 
-**Detection metrics fired:**
-- IBSTS ≥ 1 in 61% of blocks containing WETH/PEPE and WETH/SHIB transactions during peak period
-- Median VSE on victim swaps: 0.83%
-- ARG: 3.2–3.8 (consistent across operating period, indicating systematic rather than opportunistic operation)
-- PCI on primary target pools: peaked at 0.62
+The high gas-to-revenue ratio reflects the competitive dynamics of MEV-Boost: in a block-auction environment, bots bid up gas costs to maintain ordering priority, compressing net margins even as gross extraction remains large from the victim's perspective.
 
-**Enforcement status:** No regulatory action has been taken. The activity is widely considered a protocol-level externality. The CFTC's 2024 enforcement guidance on digital asset trading does not explicitly address MEV sandwich attacks, though the agency's 2023 remarks on disruptive algorithmic trading may provide a future legal basis.
+**Version 2 (August 2024).** A second bot (`0x1f2f10d1c40777ae1da742455c65828ff36df387`) was launched August 14, 2024, introducing multi-layer sandwich attacks — stacking five to seven victim transactions within a single bundle — which increases per-bundle profit while reducing the per-victim detection surface. Between August 1–14, 2024, the original bot alone generated 851 ETH (approximately $2.2 million) in builder rewards across 51,187 transactions, indicating continued large-scale operation before the new bot even launched.
 
-## Case Study 2: Jito MEV on Solana — Sandwich Spike and Temporary Mempool Shutdown (Q1 2024)
+By August 2024, the operator's cumulative lifetime profit was estimated at no less than **$22 million** — a figure that understates total victim losses, since victim revenue of $40.65 million in the first ten weeks alone substantially exceeded net profit.
 
-Solana's parallel-transaction execution model theoretically provides natural ordering protection absent on Ethereum. However, Jito Labs' block engine — adopted by approximately 35–40% of Solana validators by Q1 2024 — introduced MEV bundle submission with guaranteed atomic ordering, recreating the conditions for sandwich attacks on Solana DEXes (Raydium, Orca, Jupiter-aggregated swaps).
+**Forensic markers:** The Flashbots May–June 2023 Transparency Report confirmed jaredfromsubway.eth "amassed $40.6M in revenue in less than 3 months" and noted that MEV-Boost validators were proposing approximately 90% of Ethereum blocks by that point, meaning nearly all large-pool trades were exposed to bundle-based sandwiching. The report also noted that four relays held 80% of relay market share, concentrating the MEV submission infrastructure through which bots like this one operated.
 
-Unlike Ethereum, Jito bundles are identifiable on-chain via Jito program calls, providing a cleaner forensic signal than Ethereum where MEV-Boost bundles are not directly visible in transaction data.
+## Case Study 2: Jito Labs and the Solana Mempool Shutdown (March 2024)
 
-**Key data (Jito dashboard, 2024):**
+Solana's base architecture processes transactions without an explicit mempool — validators execute batches with no guaranteed ordering within a slot — which theoretically prevents the front-run pattern. Jito Labs' block engine, adopted by a substantial fraction of Solana validators by early 2024, added optional MEV bundle submission with guaranteed in-slot ordering. This replicated the conditions for sandwich attacks on Solana DEXes including Raydium, Orca, and Jupiter-routed swaps.
 
-| Metric | Value |
-|--------|-------|
-| Total MEV tips paid via Jito in 2024 | ~$143 million (USD equivalent) |
-| Sandwich attacks as % of Jito MEV volume | Estimated 25–35% |
-| Peak daily sandwich extraction | ~$850,000 (March 2024, Solana meme coin cycle) |
-| Median VSE on Raydium WSOL/BONK victims | 1.1% |
-| Top bot ARG (Solana) | 4.1–6.8 |
+On **March 8, 2024**, Jito Labs announced suspension of the mempool feature of its Jito-Relayer client software. Lucas Bruder, a Jito Labs contributor, stated directly:
 
-The higher ARG on Solana compared to Ethereum reflects Solana's substantially lower base transaction costs: the same gross profit is achieved with far lower gas expenditure, making sandwich attacks economically viable on even smaller victim transactions.
+> "Ultimately the Jito Labs team views negative MEV, including sandwich attacks, as a drag on the Solana ecosystem, and in the absence of an engineering solution we have made the difficult decision to suspend the mempool."
 
-**The mempool shutdown event (March 6, 2024):** Following sustained community pressure, Jito Labs announced it was disabling the mempool feature of its Jito-Relayer software, specifically citing sandwich attacks as the stated reason. This represents an unusual acknowledgement by an infrastructure operator that MEV sandwich activity is harmful enough to warrant unilateral intervention, even at the cost of reducing MEV revenue for validators running Jito software. The mempool was subsequently re-enabled after Jito Labs introduced rate-limiting and searcher restrictions. The episode confirmed that sandwich attacks were materially harming identifiable retail users rather than representing a purely abstract value transfer.
+The announcement followed a six-week period in which Jito Labs attempted and failed to engineer bundle-rejection logic that would block sandwich attacks while preserving other MEV activity. The suspension was significant for two reasons beyond its immediate effect on sandwich volume. First, it represented an explicit admission by MEV infrastructure operators — who profit from MEV fees — that sandwich attacks cause net harm to the ecosystem. Second, the shutdown drove sandwich activity toward private, opaque mempools rather than eliminating it: operators who had been submitting through Jito's public mempool migrated to private relay services, reducing transparency without reducing the attacks themselves.
 
-## Case Study 3: Arbitrum — Sequencer Protection Limits and Residual MEV (2023–2024)
-
-Arbitrum One operates as an optimistic rollup with a centralised, FIFO-ordering sequencer operated by Offchain Labs. The FIFO constraint theoretically eliminates MEV reordering: transactions are included in the order they arrive at the sequencer, with no scope for a searcher to insert a front-run before a victim transaction already in the queue.
-
-In practice, IBSTS analysis of Arbitrum block data from 2023–2024 (EigenPhi) shows sandwich activity at approximately **8% of blocks** — substantially lower than Ethereum's 34% — consistent with sequencer ordering protections providing a meaningful but not complete defence. Residual sandwich activity is concentrated in two patterns: (1) high-traffic periods where network congestion causes near-simultaneous transaction arrival at the sequencer, making FIFO ordering effectively random for same-millisecond submissions; and (2) novel token launches and liquidity unlock events where transaction volume spikes create brief windows of exploitable ordering.
-
-| Metric | Ethereum | Solana (Jito) | Arbitrum |
-|--------|----------|---------------|----------|
-| IBSTS ≥ 1 block frequency | 34% | 28% | 8% |
-| Median victim VSE | 0.71% | 1.1% | 0.55% |
-| Estimated annual extraction (2024) | ~$280M | ~$36–50M | ~$12M |
-| Bot ARG range | 3.2–3.8 | 4.1–6.8 | 5.1 |
-
-The lower frequency but higher per-attack ARG on Arbitrum indicates that sandwich attacks on L2 are rarer but larger when they do occur — consistent with concentrated execution around specific high-volume events rather than continuous background extraction.
-
-## Competitive Landscape: How This Differs from Covered Manipulation Types
-
-MEV sandwich attacks occupy a distinct position in the market manipulation taxonomy documented in this wiki:
-
-| Characteristic | Sandwich Attack | Wash Trading | Oracle Manipulation | Stop-Loss Hunting |
-|----------------|----------------|--------------|--------------------|--------------------|
-| Victim type | Retail DEX swapper | None (self-dealing) | Lending protocol | Leveraged perp trader |
-| Venue | DEX AMM (on-chain) | CEX/DEX (any) | DeFi lending | CEX/perp DEX |
-| Detection source | Block ordering data | Volume/trade-size stats | Price feed vs. spot divergence | Mark price vs. index divergence |
-| Regulatory framework | Not classified | CFTC/SEC precedent | Securities fraud | Manipulation/disruptive trading |
-| Reversibility | No | N/A | No | No |
-
-This table illustrates that sandwich attacks are the only manipulation type in this wiki where the primary detection source is **intra-block transaction ordering** rather than volume statistics or price divergence — a methodology requiring block-level data rather than OHLCV data, and one that is not addressed by any existing article in this series.
+A subsequent analysis covering January 2024 through May 2025 — presented at the Solana Accelerate conference by sandwich.me across approximately 8.5 billion trades and ~$1 trillion in DEX volume — estimated total Solana sandwich losses at **$370–$500 million** over that period. The Helius Solana MEV Report provides a detailed breakdown of post-shutdown MEV dynamics on Solana.
 
 ## Implications for Retail Traders
 
-1. **Set slippage tolerance as low as the pool will allow.** The sandwich attack break-even requires the victim's slippage tolerance to absorb the front-run price impact. Setting slippage to 0.1%–0.5% on liquid pairs eliminates the majority of profitable sandwich opportunities on those pairs. High required slippage on a given token (e.g., > 2%) is itself a signal that the pool has insufficient liquidity to protect against MEV extraction.
+Sandwich attacks concentrate on predictable conditions: large slippage tolerance, low pool liquidity, and periods of high retail urgency such as token launches and meme coin cycles. Both case studies above peaked during FOMO-driven retail activity — precisely when traders are least likely to apply protective measures.
 
-2. **Use MEV-protection RPC endpoints as the default.** Services including MEV Blocker, Flashbots Protect, CoW Protocol, and 1inch Fusion route transactions through private mempools or batch auction mechanisms that prevent mempool-visible front-running. These are available without cost and are increasingly the default on DEX aggregators.
+**Structural protections** that eliminate the mempool-visibility precondition are the most reliable defence. CoW Protocol's batch auction mechanism matches coinciding orders without sequential AMM execution, removing the front-run opportunity entirely. MEV Blocker, Flashbots Protect RPC, and 1inch Fusion similarly route transactions through private channels before block inclusion. Jupiter on Solana provides MEV protection by default on aggregated routes.
 
-3. **Prefer batch-auction aggregators over direct AMM interaction.** CoW Protocol's coincidence-of-wants matching eliminates sequential execution entirely for matched trades, structurally preventing the sandwich pattern. Jupiter on Solana similarly aggregates routes with MEV protection by default.
+Where these are unavailable — for example, when trading directly on a DEX interface — keeping slippage tolerance at the minimum the pool will accept raises the gas cost required to profit from a sandwich, particularly on high-TVL pairs. A slippage tolerance of 0.5% or below on a liquid pair typically makes the attack unprofitable after gas.
 
-4. **Treat high IBSTS pool activity as a risk indicator.** Dune Analytics hosts several public dashboards tracking real-time sandwich activity by pool and address (e.g., `dune.com/queries/1382560`). Checking a pool's recent IBSTS frequency before a large trade is analogous to checking an exchange's wash trading score before depositing funds.
-
-5. **Be especially cautious during meme coin cycles and new token launches.** Both peak extraction events documented above (jaredfromsubway.eth in May 2023; Jito peak in March 2024) coincided with retail FOMO events in newly launched tokens. These are precisely the conditions — high slippage tolerance, low pool TVL, retail urgency — that maximise sandwich profitability.
+High required slippage on a given token (above 3%) is itself a signal: it indicates pool liquidity is thin enough that a sandwich is cheap to execute, and the liquidity risk and MEV risk are correlated.
 
 ## References
 
-- Daian, P., Goldfeder, S., Kell, T., Li, Y., Zhao, X., Bentov, I., Juels, A. (2020). Flash Boys 2.0: Frontrunning in Decentralized Exchanges, Miner Extractable Value, and Consensus Instability. *2020 IEEE Symposium on Security and Privacy*, pp. 910–927. https://doi.org/10.1109/SP40000.2020.00040
-- Qin, K., Zhou, L., & Gervais, A. (2022). Quantifying Blockchain Extractable Value: How dark is the forest? *2022 IEEE Symposium on Security and Privacy*. https://doi.org/10.1109/SP46214.2022.9833734
-- Weintraub, B., Torres, C. F., Nita-Rotaru, C., & State, R. (2022). A Flash(bot) in the Pan: Measuring Maximal Extractable Value in Private Pools. *Proceedings of the 2022 Internet Measurement Conference*. https://doi.org/10.1145/3517745.3561448
-- Flashbots. (2021). *MEV-Explore v1: Quantifying Ethereum MEV*. https://explore.flashbots.net
-- EigenPhi. (2024). *Sandwich attack analytics and labelled dataset*. https://eigenphi.io/mev/ethereum/sandwich
-- Jito Labs. (2024). *Jito block engine and MEV statistics*. https://jito.wtf/mev
-- Jito Labs. (2024, March 6). *Disabling mempool to protect against sandwich attacks*. https://twitter.com/jito_labs/status/1765398273540051339
-- Torres, C. F., Baden, R., Schindler, P., & State, R. (2021). Frontrunner Jones and the Raiders of the Dark Forest: An Empirical Study of Frontrunning on the Ethereum Blockchain. *30th USENIX Security Symposium*. https://www.usenix.org/conference/usenixsecurity21/presentation/torres
+- Qin, K., Zhou, L., & Gervais, A. (2021). Quantifying Blockchain Extractable Value: How dark is the forest? *2022 IEEE Symposium on Security and Privacy*. https://arxiv.org/abs/2101.05511
+- Qin, K., et al. (2024). Remeasuring Arbitrage and Sandwich Attacks of MEV in Ethereum. https://arxiv.org/html/2405.17944v2
+- Daian, P., Goldfeder, S., Kell, T., Li, Y., Zhao, X., Bentov, I., & Juels, A. (2020). Flash Boys 2.0: Frontrunning in Decentralized Exchanges, Miner Extractable Value, and Consensus Instability. *2020 IEEE Symposium on Security and Privacy*. https://doi.org/10.1109/SP40000.2020.00040
+- EigenPhi. (2023, May). *Performance Appraisal of jaredfromsubway.eth*. https://coinmarketcap.com/academy/article/eigenphi-performance-appraisal-of-jaredfromsubway.eth
+- EigenPhi. (2024, August). *Metamorphosis of jaredfromsubway.eth: Cunninger Jared 2.0 with More Layers*. https://medium.com/@eigenphi/metamorphosis-of-jaredfromsubway-eth-cunninger-jared-2-0-with-more-layers-81a3f900c71a
+- Flashbots. (2023). *Flashbots Transparency Report May–June 2023*. https://collective.flashbots.net/t/flashbots-transparency-report-may-june-2023/1927
+- Goswami, D. (2024, March 8). Solana Client Developer Jito Announces End of 'Mempool' Function. *CoinDesk*. https://www.coindesk.com/business/2024/03/08/solana-client-developer-jito-announces-end-of-mempool-function
+- Blockworks. (2024, March 8). *Jito Labs suspends mempool functionality*. https://blockworks.co/news/jito-labs-suspends-mempool-functionality
+- Helius. *Solana MEV Report*. https://www.helius.dev/blog/solana-mev-report
+- Cointelegraph / EigenPhi. (2025). *Exclusive data from EigenPhi reveals that sandwich attacks on Ethereum have waned*. https://cointelegraph.com/research/exclusive-data-from-eigenphi-reveals-that-sandwich-attacks-on-ethereum-have-waned
